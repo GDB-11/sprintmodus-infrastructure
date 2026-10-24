@@ -1,0 +1,39 @@
+# One-shot: migrates master_db and then every active tenant DB through Flyway (the auth-service image in profile `migrator`).
+# deploy.sh deletes the previous Job and waits for this one before starting the services (a Job cannot be updated in place).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrator
+  labels: { app: migrator, phase: 2-migrate }
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels: { app: migrator }
+    spec:
+      enableServiceLinks: false
+      restartPolicy: Never
+      containers:
+        - name: migrator
+          image: ghcr.io/gdb-11/sprintmodus-auth-service
+          command: ["java", "-XX:MaxRAMPercentage=55", "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1", "-Xss512k", "-XX:+ExitOnOutOfMemoryError", "-jar", "app.jar"]
+          env:
+            - { name: SPRING_PROFILES_ACTIVE, value: migrator }
+            - { name: EUREKA_URL, value: "http://eureka-server:8761/eureka" }
+            - { name: TENANT_DB_HOST, value: master-db }
+            - { name: TENANT_DB_PORT, value: "3306" }
+            - { name: TENANT_DB_USERNAME, value: root }
+            - { name: TENANT_DB_JDBC_PARAMETERS, value: "connectionTimeZone=UTC&allowPublicKeyRetrieval=true" }
+            - { name: MASTER_DB_URL, value: "jdbc:mysql://master-db:3306/master_db?connectionTimeZone=UTC&allowPublicKeyRetrieval=true" }
+            - { name: MASTER_DB_USERNAME, value: root }
+            - name: MASTER_DB_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: sprintmodus-secrets, key: MASTER_DB_ROOT_PASSWORD } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: sprintmodus-secrets, key: JWT_SECRET } }
+            - name: TENANT_CREDENTIALS_KEY
+              valueFrom: { secretKeyRef: { name: sprintmodus-secrets, key: TENANT_CREDENTIALS_KEY } }
+            - name: TENANT_CREDENTIALS_SALT
+              valueFrom: { secretKeyRef: { name: sprintmodus-secrets, key: TENANT_CREDENTIALS_SALT } }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 512Mi }

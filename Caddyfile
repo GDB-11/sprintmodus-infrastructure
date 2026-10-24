@@ -1,0 +1,38 @@
+# HTTPS for the public domain. Caddy gets and renews the Let's Encrypt certificate by itself (it needs ports 80 and 443 reachable
+# from the internet and the domain's DNS pointing at this machine). It sits in front of the frontend's nginx and adds
+# X-Forwarded-For/-Proto/-Host, which nginx passes on to the gateway. WebSocket upgrades pass through untouched.
+#
+# DOMAIN and ACME_EMAIL come from the environment (see .env.example).
+{
+	# Let's Encrypt writes to this address when a certificate is about to expire and could not be renewed
+	email {$ACME_EMAIL}
+
+	# Let's Encrypt production by default. Set ACME_CA to the staging directory
+	# (https://acme-staging-v02.api.letsencrypt.org/directory) for a dry run: it has generous limits, and its certificates are
+	# untrusted by browsers. Switch back and `docker volume rm` caddy-data once it works.
+	acme_ca {$ACME_CA:https://acme-v02.api.letsencrypt.org/directory}
+
+	# The board WebSocket URL carries ?token=<JWT>, and Caddy's error log includes the request URI: the token is never logged
+	log {
+		format filter {
+			wrap console
+			request>uri query {
+				replace token REDACTED
+			}
+			request>headers>Authorization replace REDACTED
+			request>headers>Cookie replace REDACTED
+		}
+	}
+}
+
+{$DOMAIN} {
+	# Browsers that have seen this once refuse plain HTTP for a year. Only this exact host (no includeSubDomains, no preload),
+	# so a mistake here cannot lock anything else out.
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy frontend:8080
+}
+
+# One canonical address: www redirects to the bare domain (the WebSocket and CORS checks know only that one origin)
+www.{$DOMAIN} {
+	redir https://{$DOMAIN}{uri} permanent
+}

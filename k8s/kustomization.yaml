@@ -1,0 +1,37 @@
+# Sprintmodus on k3s. Applied in waves by deploy.sh (the `phase` label on each object), never with a bare `kubectl apply -k`:
+# MySQL first, then the migration Job, then Eureka, then the services, then the public edge.
+#
+# __DOMAIN__ is replaced by deploy.sh with $DOMAIN (default sprintmodus.com).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: sprintmodus
+
+resources:
+  - mysql.yaml
+  - backup.yaml
+  - migrator.yaml
+  - eureka-server.yaml
+  - auth-service.yaml
+  - project-service.yaml
+  - workitem-service.yaml
+  - api-gateway.yaml
+  - frontend.yaml
+  - ingress.yaml
+
+configMapGenerator:
+  - name: sprintmodus-config
+    literals:
+      - PUBLIC_ORIGIN=https://__DOMAIN__
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    phase: 1-db
+
+# Pin each image to a commit tag (never latest). One place to change when you redeploy.
+images:
+  - { name: ghcr.io/gdb-11/sprintmodus-eureka-server,    newTag: sha-c2b77da }
+  - { name: ghcr.io/gdb-11/sprintmodus-api-gateway,      newTag: sha-f42a720 }
+  - { name: ghcr.io/gdb-11/sprintmodus-auth-service,     newTag: sha-c8b4a78 }
+  - { name: ghcr.io/gdb-11/sprintmodus-project-service,  newTag: sha-b30ad34 }
+  - { name: ghcr.io/gdb-11/sprintmodus-workitem-service, newTag: sha-45fb45e }
+  - { name: ghcr.io/gdb-11/sprintmodus-ng,               newTag: sha-d9bbe6a }

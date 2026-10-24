@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: workitem-service
+  labels: { app: workitem-service, phase: 4-services }
+spec:
+  selector: { app: workitem-service }
+  ports:
+    - { name: http, port: 8093 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workitem-service
+  labels: { app: workitem-service, phase: 4-services }
+spec:
+  replicas: 1
+  strategy:
+    # One instance, and little RAM: stop the old pod before starting the new one rather than running two JVMs side by side
+    type: Recreate
+  selector:
+    matchLabels: { app: workitem-service }
+  template:
+    metadata:
+      labels: { app: workitem-service }
+    spec:
+      enableServiceLinks: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001 }
+      containers:
+        - name: workitem-service
+          image: ghcr.io/gdb-11/sprintmodus-workitem-service
+          command: ["java", "-XX:MaxRAMPercentage=55", "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1", "-Xss512k", "-XX:+ExitOnOutOfMemoryError", "-jar", "app.jar"]
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          ports:
+            - { name: http, containerPort: 8093 }
+          env:
+            - { name: EUREKA_URL, value: "http://eureka-server:8761/eureka" }
+            - { name: EUREKA_INSTANCE_PREFER_IP_ADDRESS, value: "true" }
+            - { name: TENANT_DB_HOST, value: master-db }
+            - { name: TENANT_DB_PORT, value: "3306" }
+            - { name: TENANT_DB_USERNAME, value: root }
+            - { name: TENANT_DB_JDBC_PARAMETERS, value: "connectionTimeZone=UTC&allowPublicKeyRetrieval=true" }
+            - name: MASTER_DB_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: sprintmodus-secrets, key: MASTER_DB_ROOT_PASSWORD } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: sprintmodus-secrets, key: JWT_SECRET } }
+            - { name: WEBSOCKET_ALLOWED_ORIGINS, valueFrom: { configMapKeyRef: { name: sprintmodus-config, key: PUBLIC_ORIGIN } } }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 5
+            failureThreshold: 80
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 320Mi }
+            limits: { memory: 448Mi }

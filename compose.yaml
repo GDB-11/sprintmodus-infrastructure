@@ -1,0 +1,213 @@
+# Sprintmodus: the whole system from published images. No service is built from source here (each repo builds and publishes its
+# own image); this repo only wires them together.  MySQL only: MariaDB is not allowed on this project.
+#
+#   docker compose up -d --wait        the whole stack (needs .env, see .env.example)
+#   docker compose up -d master-db     only MySQL, to run a service or the Angular dev server from the IDE (add compose.dev.yaml)
+#   docker compose run --rm migrator   migrate the master DB and every active tenant DB (also runs on every `up`)
+name: sprintmodus
+
+x-service: &service
+  restart: unless-stopped
+  networks: [sprintmodus-net]
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+# Shared by the three services that reach the tenant databases (and by the migrator)
+x-tenant-db: &tenant-db
+  EUREKA_URL: http://eureka-server:8761/eureka
+  TENANT_DB_HOST: master-db
+  TENANT_DB_PORT: "3306"
+  TENANT_DB_USERNAME: root
+  # MySQL 8.4+ authenticates with caching_sha2_password, which needs this on a connection without TLS (the database is only
+  # reachable on the internal network)
+  TENANT_DB_JDBC_PARAMETERS: connectionTimeZone=UTC&allowPublicKeyRetrieval=true
+  MASTER_DB_ROOT_PASSWORD: ${MASTER_DB_ROOT_PASSWORD:?set MASTER_DB_ROOT_PASSWORD in .env}
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (at least 64 characters)}
+
+x-auth-env: &auth-env
+  <<: *tenant-db
+  MASTER_DB_URL: jdbc:mysql://master-db:3306/master_db?connectionTimeZone=UTC&allowPublicKeyRetrieval=true
+  MASTER_DB_USERNAME: root
+  TENANT_CREDENTIALS_KEY: ${TENANT_CREDENTIALS_KEY:?set TENANT_CREDENTIALS_KEY in .env}
+  TENANT_CREDENTIALS_SALT: ${TENANT_CREDENTIALS_SALT:?set TENANT_CREDENTIALS_SALT in .env (hex)}
+
+services:
+  master-db:
+    <<: *service
+    image: mysql:9.7
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # Every tenant gets its own pools in each of the three services that open tenant databases (5 connections each at most,
+      # opened on demand), so the default of 151 runs out with a few dozen active tenants
+      - --max-connections=${MYSQL_MAX_CONNECTIONS:-500}
+      # The main cache of InnoDB; keep it well under the container's memory limit below
+      - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-512M}
+      # Binary logs (on by default) allow restoring to a point in time between two backups, but grow without bound: keep 7 days
+      - --binlog-expire-logs-seconds=${MYSQL_BINLOG_RETENTION_SECONDS:-604800}
+      # Durability is left at MySQL's safe defaults (innodb_flush_log_at_trx_commit=1, sync_binlog=1): a committed change survives a crash
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MASTER_DB_ROOT_PASSWORD:?set MASTER_DB_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: master_db
+    volumes:
+      # ALL data of ALL tenants. A named volume survives `docker compose down` and image upgrades; only `down -v` or
+      # `docker volume rm` deletes it, so never run those on a stack that holds real data (see README, "Data safety")
+      - master-db-data:/var/lib/mysql
+    # A clean shutdown flushes the buffer pool; give it time before Docker escalates to SIGKILL
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { memory: "${MYSQL_MEMORY_LIMIT:-1536m}" }
+
+  # Scheduled logical backups (master_db + every tenant_*), kept BACKUP_KEEP_DAYS days. See scripts/backup.sh and README, "Backups".
+  db-backup:
+    <<: *service
+    image: mysql:9.7
+    entrypoint: ["/usr/local/bin/backup.sh"]
+    environment:
+      MYSQL_HOST: master-db
+      MYSQL_ROOT_PASSWORD: ${MASTER_DB_ROOT_PASSWORD:?set MASTER_DB_ROOT_PASSWORD in .env}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+      # A named volume by default; set BACKUP_DIR to a host path (e.g. /srv/sprintmodus/backups) to sync it off the machine
+      - ${BACKUP_DIR:-db-backups}:/backups
+    healthcheck:
+      # unhealthy when the newest backup is older than one interval plus an hour
+      test: ["CMD-SHELL", "find /backups -name 'sprintmodus-*.sql.gz' -mmin -$$(( ${BACKUP_INTERVAL_HOURS:-24} * 60 + 60 )) | grep -q ."]
+      interval: 5m
+      timeout: 10s
+      retries: 1
+      start_period: 5m
+    depends_on:
+      master-db:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { memory: 256m }
+
+  # One-shot: migrates the master DB (at startup) and then every active tenant DB, through Flyway, and exits 0 (1 if any tenant
+  # failed). It is the auth-service image in its "migrator" profile, so it carries exactly the scripts auth-service onboards
+  # new tenants with. Everything that touches a tenant database waits for it.
+  migrator:
+    <<: *service
+    image: ${REGISTRY:-ghcr.io/gdb-11}/sprintmodus-auth-service:${AUTH_SERVICE_TAG:?pin AUTH_SERVICE_TAG in .env (a version or sha- tag, never latest)}
+    restart: "no"
+    environment:
+      <<: *auth-env
+      SPRING_PROFILES_ACTIVE: migrator
+    healthcheck:
+      disable: true
+    depends_on:
+      master-db:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { memory: 768m }
+
+  eureka-server:
+    <<: *service
+    image: ${REGISTRY:-ghcr.io/gdb-11}/sprintmodus-eureka-server:${EUREKA_SERVER_TAG:?pin EUREKA_SERVER_TAG in .env (a version or sha- tag, never latest)}
+    deploy:
+      resources:
+        limits: { memory: 512m }
+
+  auth-service:
+    <<: *service
+    image: ${REGISTRY:-ghcr.io/gdb-11}/sprintmodus-auth-service:${AUTH_SERVICE_TAG:?pin AUTH_SERVICE_TAG in .env (a version or sha- tag, never latest)}
+    environment: *auth-env
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits: { memory: 768m }
+
+  project-service:
+    <<: *service
+    image: ${REGISTRY:-ghcr.io/gdb-11}/sprintmodus-project-service:${PROJECT_SERVICE_TAG:?pin PROJECT_SERVICE_TAG in .env (a version or sha- tag, never latest)}
+    environment: *tenant-db
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits: { memory: 768m }
+
+  # EXACTLY ONE instance, on purpose: the STOMP broker of the board WebSocket lives in this process's memory, so a second
+  # instance would never see the other's events (a user connected to A would miss what happens on B). Do not add
+  # `deploy.replicas` or `--scale`; see README, "Why workitem-service runs once".
+  workitem-service:
+    <<: *service
+    image: ${REGISTRY:-ghcr.io/gdb-11}/sprintmodus-workitem-service:${WORKITEM_SERVICE_TAG:?pin WORKITEM_SERVICE_TAG in .env (a version or sha- tag, never latest)}
+    environment:
+      <<: *tenant-db
+      # The public address(es) of the frontend: the handshake refuses any other Origin
+      WEBSOCKET_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env (e.g. http://localhost:8080)}
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits: { memory: 768m }
+
+  api-gateway:
+    <<: *service
+    image: ${REGISTRY:-ghcr.io/gdb-11}/sprintmodus-api-gateway:${API_GATEWAY_TAG:?pin API_GATEWAY_TAG in .env (a version or sha- tag, never latest)}
+    environment:
+      EUREKA_URL: http://eureka-server:8761/eureka
+      # The gateway is the only CORS authority (nginx adds no CORS headers). A browser sends Origin on every POST and on the
+      # WebSocket handshake, so the frontend's public address must be allowed here even though it is the same origin.
+      # Comma-separate more to also allow local development (e.g. http://localhost:4200).
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env (e.g. http://localhost:8080)}}
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8090}:8090"
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      project-service:
+        condition: service_healthy
+      workitem-service:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { memory: 768m }
+
+  # nginx: the one origin the browser talks to. Serves the app and proxies /auth, /api and /ws to the gateway.
+  frontend:
+    <<: *service
+    image: ${REGISTRY:-ghcr.io/gdb-11}/sprintmodus-ng:${FRONTEND_TAG:?pin FRONTEND_TAG in .env (a version or sha- tag, never latest)}
+    environment:
+      GATEWAY_URL: http://api-gateway:8090
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { memory: 128m }
+
+networks:
+  sprintmodus-net: {}
+
+volumes:
+  master-db-data: {}
+  db-backups: {}

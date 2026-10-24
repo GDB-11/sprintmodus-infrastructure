@@ -1,0 +1,48 @@
+# Production overlay: HTTPS on the public domain (sprintmodus.com) in front of the stack. Caddy is the only thing that listens on
+# the public interface; the frontend, gateway and everything else stay on the internal network.
+#
+#   docker compose -f compose.yaml -f compose.prod.yaml up -d --wait          (or COMPOSE_FILE=compose.yaml:compose.prod.yaml)
+#
+# Needs: DOMAIN, ACME_EMAIL and PUBLIC_ORIGIN=https://<DOMAIN> in .env, the domain's DNS A/AAAA record pointing at this machine and
+# ports 80 and 443 open (80 is needed for the certificate challenge and for the redirect to https).
+services:
+  caddy:
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    networks: [sprintmodus-net]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env (e.g. sprintmodus.com)}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env (Let's Encrypt writes here about expiring certificates)}
+      ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp" # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account. MUST persist: without them every restart would ask Let's Encrypt for new certificates
+      # and hit its rate limits (a handful per domain per week), leaving the site without HTTPS until the limit lifts.
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    depends_on:
+      frontend:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { memory: 128m }
+
+  # No longer published: everything reaches it through Caddy
+  frontend:
+    ports: !reset []
+
+volumes:
+  caddy-data: {}
+  caddy-config: {}

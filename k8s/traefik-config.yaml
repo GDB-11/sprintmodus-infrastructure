@@ -1,0 +1,22 @@
+# Customises the Traefik that k3s installs (applied by deploy.sh; k3s's helm controller reconciles it, Traefik restarts once).
+# ACME_EMAIL is replaced by deploy.sh. The certificate store is on a small PVC so a Traefik restart does not re-request
+# certificates (Let's Encrypt rate-limits that). Traefik's access log is off by default, so the board WebSocket's ?token=<JWT> is
+# not written anywhere; do not turn it on without redacting the query.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    additionalArguments:
+      - "--certificatesresolvers.le.acme.email=__ACME_EMAIL__"
+      - "--certificatesresolvers.le.acme.storage=/data/acme.json"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.le.acme.caserver=__ACME_CA__"
+    persistence:
+      enabled: true
+      size: 128Mi
+    resources:
+      requests: { cpu: 25m, memory: 48Mi }
+      limits: { memory: 160Mi }

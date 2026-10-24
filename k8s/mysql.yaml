@@ -1,0 +1,71 @@
+# ALL data of ALL tenants lives on this one PVC (k3s local-path: a directory on the node's disk). Deleting the PVC, the namespace
+# or the server deletes the data: see README, "Data safety". Tuned for a 4 GB node (the compose defaults are for production)
+apiVersion: v1
+kind: Service
+metadata:
+  name: master-db
+  labels: { app: master-db, phase: 1-db }
+spec:
+  clusterIP: None
+  selector: { app: master-db }
+  ports:
+    - { name: mysql, port: 3306 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: master-db
+  labels: { app: master-db, phase: 1-db }
+spec:
+  serviceName: master-db
+  replicas: 1
+  selector:
+    matchLabels: { app: master-db }
+  template:
+    metadata:
+      labels: { app: master-db }
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: mysql
+          image: mysql:9.7
+          args:
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_unicode_ci
+            - --max-connections=100
+            - --innodb-buffer-pool-size=256M
+            # The performance schema alone costs a few hundred MB of RAM; nothing here reads it
+            - --performance-schema=OFF
+            - --binlog-expire-logs-seconds=259200
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: sprintmodus-secrets, key: MASTER_DB_ROOT_PASSWORD } }
+            - name: MYSQL_DATABASE
+              value: master_db
+          ports:
+            - { name: mysql, containerPort: 3306 }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/mysql }
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { memory: 768Mi }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels: { phase: 1-db }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests: { storage: 10Gi }

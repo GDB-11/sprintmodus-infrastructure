@@ -1,0 +1,15 @@
+# Development override: publishes the internal ports so a service, the Angular dev server or a SQL client can run on the host
+# against the containers. Never used in a deployment.
+#   docker compose -f compose.yaml -f compose.dev.yaml up -d master-db
+# (or set COMPOSE_FILE=compose.yaml:compose.dev.yaml once)
+services:
+  master-db:
+    ports: ["127.0.0.1:3306:3306"]
+  eureka-server:
+    ports: ["127.0.0.1:8761:8761"]
+  auth-service:
+    ports: ["127.0.0.1:8091:8091"]
+  project-service:
+    ports: ["127.0.0.1:8092:8092"]
+  workitem-service:
+    ports: ["127.0.0.1:8093:8093"]

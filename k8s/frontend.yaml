@@ -1,0 +1,43 @@
+# nginx: serves the Angular app and proxies /auth, /api and /ws to the gateway. Traefik (ingress.yaml) is the only thing that
+# faces the internet and talks to it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  labels: { app: frontend, phase: 4-services }
+spec:
+  selector: { app: frontend }
+  ports:
+    - { name: http, port: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels: { app: frontend, phase: 4-services }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: frontend }
+  template:
+    metadata:
+      labels: { app: frontend }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: frontend
+          image: ghcr.io/gdb-11/sprintmodus-ng
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          env:
+            - { name: GATEWAY_URL, value: "http://api-gateway:8090" }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 10m, memory: 24Mi }
+            limits: { memory: 96Mi }

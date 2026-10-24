@@ -1,0 +1,8 @@
+# Real values and local overrides never leave the machine
+.env
+.env.*
+!.env.example
+compose.override.yaml
+
+# Throwaway Maven repository used while building images locally (scripts/local.sh)
+.local/
